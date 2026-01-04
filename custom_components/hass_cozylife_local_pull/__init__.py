@@ -4,6 +4,7 @@ from __future__ import annotations
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.discovery import async_load_platform
 from homeassistant.helpers.typing import ConfigType
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import logging
 import asyncio
 from .const import (
@@ -34,9 +35,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     _LOGGER.info(f'Discovered devices at: {ip_list}')
 
-    # Get language setting
+    # Get language setting and fetch device models
     lang_from_config = config[DOMAIN].get('lang') if config[DOMAIN].get('lang') is not None else LANG
-    get_pid_list(lang_from_config)
+    session = async_get_clientsession(hass)
+    await get_pid_list(session, lang_from_config)
 
     # Create TCP clients for all devices
     tcp_clients = [tcp_client(ip_addr) for ip_addr in ip_list]
