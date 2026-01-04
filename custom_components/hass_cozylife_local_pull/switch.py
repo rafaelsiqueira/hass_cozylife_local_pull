@@ -51,19 +51,33 @@ def setup_platform(
 
 class CozyLifeSwitch(SwitchEntity):
     _tcp_client = None
-    _attr_is_on = True
-    
+    _attr_available = False
+    _attr_is_on = False
+
     def __init__(self, tcp_client) -> None:
         """Initialize the sensor."""
         _LOGGER.info('__init__')
         self._tcp_client = tcp_client
         self._unique_id = tcp_client.device_id
         self._name = tcp_client.device_model_name + ' ' + tcp_client.device_id[-4:]
+        self._attr_available = False  # Start as unavailable
+        self._attr_is_on = False
         self._refresh_state()
-    
+
     def _refresh_state(self):
-        self._state = self._tcp_client.query()
-        self._attr_is_on = 0 != self._state['1']
+        """Refresh device state from query"""
+        result = self._tcp_client.query()
+
+        if result.success:
+            self._attr_available = True
+            # Safe access with default value
+            self._attr_is_on = result.data.get('1', 0) != 0
+            _LOGGER.debug(f'Switch {self._name} state refreshed: is_on={self._attr_is_on}')
+        else:
+            # Mark as unavailable on error
+            self._attr_available = False
+            _LOGGER.warning(f'Switch {self._name} unavailable: {result.error_message}')
+            # Keep last known state for is_on
     
     @property
     def name(self) -> str:
@@ -72,14 +86,13 @@ class CozyLifeSwitch(SwitchEntity):
     @property
     def available(self) -> bool:
         """Return if the device is available."""
-        return True
-    
+        return self._attr_available
+
     @property
     def is_on(self) -> bool:
         """Return True if entity is on."""
-        self._attr_is_on = True
-
-        self._refresh_state()
+        if self._attr_available:
+            self._refresh_state()
         return self._attr_is_on
     
     @property
@@ -89,17 +102,32 @@ class CozyLifeSwitch(SwitchEntity):
     
     def turn_on(self, **kwargs: Any) -> None:
         """Turn the entity on."""
-        self._attr_is_on = True
         _LOGGER.info(f'turn_on:{kwargs}')
-        self._tcp_client.control({'1': 255})
-        return None
-        raise NotImplementedError()
-    
+
+        if not self._attr_available:
+            _LOGGER.warning(f'Cannot turn on {self._name} - device unavailable')
+            return
+
+        success = self._tcp_client.control({'1': 255})
+        if success:
+            self._attr_is_on = True
+            self._refresh_state()  # Verify state change
+        else:
+            _LOGGER.error(f'Failed to turn on {self._name}')
+            self._attr_available = False
+
     def turn_off(self, **kwargs: Any) -> None:
         """Turn the entity off."""
-        self._attr_is_on = False
         _LOGGER.info('turn_off')
-        self._tcp_client.control({'1': 0})
-        return None
-        
-        raise NotImplementedError()
+
+        if not self._attr_available:
+            _LOGGER.warning(f'Cannot turn off {self._name} - device unavailable')
+            return
+
+        success = self._tcp_client.control({'1': 0})
+        if success:
+            self._attr_is_on = False
+            self._refresh_state()  # Verify state change
+        else:
+            _LOGGER.error(f'Failed to turn off {self._name}')
+            self._attr_available = False

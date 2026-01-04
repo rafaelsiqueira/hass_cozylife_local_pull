@@ -99,40 +99,58 @@ class CozyLifeLight(LightEntity):
         self._tcp_client = tcp_client
         self._unique_id = tcp_client.device_id
         self._name = tcp_client.device_model_name + ' ' + tcp_client.device_id[-4:]
-        
-        _LOGGER.info(f'before:{self._unique_id}._attr_color_mode={self._attr_color_mode}._attr_supported_color_modes='
-                     f'{self._attr_supported_color_modes}.dpid={tcp_client.dpid}')
-        # h s
+        self._attr_available = False  # Start as unavailable
+        self._attr_is_on = False
+        self._attr_brightness = None
+        self._attr_color_temp = None
+        self._attr_hs_color = None
+
+        _LOGGER.info(f'before:{self._unique_id}._attr_color_mode={self._attr_color_mode}.'
+                     f'_attr_supported_color_modes={self._attr_supported_color_modes}.dpid={tcp_client.dpid}')
+
+        # Configure color modes based on device capabilities
         if 3 in tcp_client.dpid:
             self._attr_color_mode = COLOR_MODE_COLOR_TEMP
             self._attr_supported_color_modes.add(COLOR_MODE_COLOR_TEMP)
-        
+
         if 5 in tcp_client.dpid or 6 in tcp_client.dpid:
             self._attr_color_mode = COLOR_MODE_HS
             self._attr_supported_color_modes.add(COLOR_MODE_HS)
-        
-        _LOGGER.info(f'after:{self._unique_id}._attr_color_mode={self._attr_color_mode}._attr_supported_color_modes='
-                     f'{self._attr_supported_color_modes}.dpid={tcp_client.dpid}')
-        
+
+        _LOGGER.info(f'after:{self._unique_id}._attr_color_mode={self._attr_color_mode}.'
+                     f'_attr_supported_color_modes={self._attr_supported_color_modes}.dpid={tcp_client.dpid}')
+
         self._refresh_state()
     
     def _refresh_state(self):
-        """
-        query device & set attr
-        :return:
-        """
-        self._state = self._tcp_client.query()
-        _LOGGER.info(f'_state={self._state}')
-        self._attr_is_on = 0 < self._state['1']
-        
-        if '4' in self._state:
-            self._attr_brightness = int(self._state['4'] / 4)
-        
-        if '5' in self._state:
-            self._attr_hs_color = (int(self._state['5']), int(self._state['6'] / 10))
-        
-        if '3' in self._state:
-            self._attr_color_temp = 500 - int(self._state['3'] / 2)
+        """Query device and set attributes"""
+        result = self._tcp_client.query()
+
+        if result.success:
+            self._attr_available = True
+            data = result.data
+
+            _LOGGER.debug(f'Light {self._name} state data={data}')
+
+            # Safe access to all state values
+            self._attr_is_on = data.get('1', 0) > 0
+
+            if '4' in data:
+                self._attr_brightness = int(data['4'] / 4)
+
+            if '5' in data and '6' in data:
+                self._attr_hs_color = (int(data['5']), int(data['6'] / 10))
+
+            if '3' in data:
+                self._attr_color_temp = 500 - int(data['3'] / 2)
+
+            _LOGGER.debug(f'Light {self._name} refreshed: is_on={self._attr_is_on}, '
+                         f'brightness={self._attr_brightness}, color_temp={self._attr_color_temp}')
+        else:
+            # Mark as unavailable on error
+            self._attr_available = False
+            _LOGGER.warning(f'Light {self._name} unavailable: {result.error_message}')
+            # Keep last known state values
     
     @property
     def name(self) -> str:
@@ -141,12 +159,13 @@ class CozyLifeLight(LightEntity):
     @property
     def available(self) -> bool:
         """Return if the device is available."""
-        return True
-    
+        return self._attr_available
+
     @property
     def is_on(self) -> bool:
         """Return True if entity is on."""
-        self._refresh_state()
+        if self._attr_available:
+            self._refresh_state()
         return self._attr_is_on
     
     @property
@@ -161,58 +180,71 @@ class CozyLifeLight(LightEntity):
 
     def turn_on(self, **kwargs: Any) -> None:
         """Turn the entity on."""
-        self._attr_is_on = True
+        if not self._attr_available:
+            _LOGGER.warning(f'Cannot turn on {self._name} - device unavailable')
+            return
+
         brightness = kwargs.get(ATTR_BRIGHTNESS)
-        # 153 ~ 500
         colortemp = kwargs.get(ATTR_COLOR_TEMP)
-        # tuple
         hs_color = kwargs.get(ATTR_HS_COLOR)
         rgb = kwargs.get(ATTR_RGB_COLOR)
         flash = kwargs.get(ATTR_FLASH)
         effect = kwargs.get(ATTR_EFFECT)
+
         _LOGGER.info(f'turn_on.kwargs={kwargs}')
-        
+
         payload = {'1': 255, '2': 0}
+
         if brightness is not None:
             payload['4'] = brightness * 4
             self._attr_brightness = brightness
-        
+
         if hs_color is not None:
             payload['5'] = int(hs_color[0])
             payload['6'] = int(hs_color[1] * 10)
             self._attr_hs_color = hs_color
-        
+
         if colortemp is not None:
             payload['3'] = 1000 - colortemp * 2
-        
-        self._tcp_client.control(payload)
-        self._refresh_state()
-        return None
-        raise NotImplementedError()
-    
+
+        success = self._tcp_client.control(payload)
+        if success:
+            self._attr_is_on = True
+            self._refresh_state()  # Verify state change
+        else:
+            _LOGGER.error(f'Failed to turn on {self._name}')
+            self._attr_available = False
+
     def turn_off(self, **kwargs: Any) -> None:
         """Turn the entity off."""
-        self._attr_is_on = False
+        if not self._attr_available:
+            _LOGGER.warning(f'Cannot turn off {self._name} - device unavailable')
+            return
+
         _LOGGER.info(f'turn_off.kwargs={kwargs}')
-        self._tcp_client.control({'1': 0})
-        self._refresh_state()
-        
-        return None
-        
-        raise NotImplementedError()
+
+        success = self._tcp_client.control({'1': 0})
+        if success:
+            self._attr_is_on = False
+            self._refresh_state()  # Verify state change
+        else:
+            _LOGGER.error(f'Failed to turn off {self._name}')
+            self._attr_available = False
     
     @property
     def hs_color(self) -> tuple[float, float] | None:
         """Return the hue and saturation color value [float, float]."""
         _LOGGER.info('hs_color')
-        self._refresh_state()
+        if self._attr_available:
+            self._refresh_state()
         return self._attr_hs_color
-    
+
     @property
     def brightness(self) -> int | None:
         """Return the brightness of this light between 0..255."""
         _LOGGER.info('brightness')
-        self._refresh_state()
+        if self._attr_available:
+            self._refresh_state()
         return self._attr_brightness
     
     @property
