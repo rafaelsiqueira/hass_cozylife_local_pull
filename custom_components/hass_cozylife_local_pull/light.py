@@ -71,8 +71,8 @@ def setup_platform(
     lights = []
     for item in hass.data[DOMAIN]['tcp_client']:
         if LIGHT_TYPE_CODE == item.device_type_code:
-            lights.append(CozyLifeLight(item))
-    
+            lights.append(CozyLifeLight(item, hass))
+
     add_entities(lights)
 
 
@@ -94,10 +94,11 @@ class CozyLifeLight(LightEntity):
     # _attr_color_temp = int
     # _attr_hs_color = (float, float)
 
-    def __init__(self, tcp_client: tcp_client) -> None:
+    def __init__(self, tcp_client: tcp_client, hass) -> None:
         """Initialize the sensor."""
         _LOGGER.info('__init__')
         self._tcp_client = tcp_client
+        self._hass = hass
         self._unique_id = tcp_client.device_id
         self._name = tcp_client.device_model_name + ' ' + tcp_client.device_id[-4:]
         self._attr_available = False  # Start as unavailable
@@ -125,7 +126,8 @@ class CozyLifeLight(LightEntity):
 
     async def async_update(self):
         """Fetch new state data for this light (called by HA periodically)"""
-        result = self._tcp_client.query()
+        # Run blocking query() in executor to avoid blocking event loop
+        result = await self._hass.async_add_executor_job(self._tcp_client.query)
 
         if result.success:
             self._attr_available = True
@@ -206,7 +208,10 @@ class CozyLifeLight(LightEntity):
         if colortemp is not None:
             payload['3'] = 1000 - colortemp * 2
 
-        success = self._tcp_client.control(payload)
+        # Run blocking control() in executor to avoid blocking event loop
+        success = await self._hass.async_add_executor_job(
+            self._tcp_client.control, payload
+        )
         if success:
             self._attr_is_on = True
             # State will be verified on next async_update() call
@@ -222,7 +227,10 @@ class CozyLifeLight(LightEntity):
 
         _LOGGER.info(f'turn_off.kwargs={kwargs}')
 
-        success = self._tcp_client.control({'1': 0})
+        # Run blocking control() in executor to avoid blocking event loop
+        success = await self._hass.async_add_executor_job(
+            self._tcp_client.control, {'1': 0}
+        )
         if success:
             self._attr_is_on = False
             # State will be verified on next async_update() call

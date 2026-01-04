@@ -44,8 +44,8 @@ def setup_platform(
     switchs = []
     for item in hass.data[DOMAIN]['tcp_client']:
         if SWITCH_TYPE_CODE == item.device_type_code:
-            switchs.append(CozyLifeSwitch(item))
-    
+            switchs.append(CozyLifeSwitch(item, hass))
+
     add_entities(switchs)
 
 
@@ -55,10 +55,11 @@ class CozyLifeSwitch(SwitchEntity):
     _attr_is_on = False
     _attr_should_poll = True  # Enable polling for this entity
 
-    def __init__(self, tcp_client) -> None:
+    def __init__(self, tcp_client, hass) -> None:
         """Initialize the sensor."""
         _LOGGER.info('__init__')
         self._tcp_client = tcp_client
+        self._hass = hass
         self._unique_id = tcp_client.device_id
         self._name = tcp_client.device_model_name + ' ' + tcp_client.device_id[-4:]
         self._attr_available = False  # Start as unavailable
@@ -67,7 +68,8 @@ class CozyLifeSwitch(SwitchEntity):
 
     async def async_update(self):
         """Fetch new state data for this switch (called by HA periodically)"""
-        result = self._tcp_client.query()
+        # Run blocking query() in executor to avoid blocking event loop
+        result = await self._hass.async_add_executor_job(self._tcp_client.query)
 
         if result.success:
             self._attr_available = True
@@ -107,7 +109,10 @@ class CozyLifeSwitch(SwitchEntity):
             _LOGGER.warning(f'Cannot turn on {self._name} - device unavailable')
             return
 
-        success = self._tcp_client.control({'1': 255})
+        # Run blocking control() in executor to avoid blocking event loop
+        success = await self._hass.async_add_executor_job(
+            self._tcp_client.control, {'1': 255}
+        )
         if success:
             self._attr_is_on = True
             # State will be verified on next async_update() call
@@ -123,7 +128,10 @@ class CozyLifeSwitch(SwitchEntity):
             _LOGGER.warning(f'Cannot turn off {self._name} - device unavailable')
             return
 
-        success = self._tcp_client.control({'1': 0})
+        # Run blocking control() in executor to avoid blocking event loop
+        success = await self._hass.async_add_executor_job(
+            self._tcp_client.control, {'1': 0}
+        )
         if success:
             self._attr_is_on = False
             # State will be verified on next async_update() call
