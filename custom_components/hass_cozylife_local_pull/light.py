@@ -1,36 +1,17 @@
-"""Platform for sensor integration."""
+"""Platform for light integration."""
 from __future__ import annotations
 
-from homeassistant.components.sensor import SensorEntity
-from homeassistant.components.switch import SwitchEntity
-from homeassistant.components.light import LightEntity
-# from homeassistant.components.light import *
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_TEMP,
-    ATTR_EFFECT,
-    ATTR_FLASH,
     ATTR_HS_COLOR,
-    ATTR_KELVIN,
-    ATTR_RGB_COLOR,
-    ATTR_TRANSITION,
-    COLOR_MODE_BRIGHTNESS,
-    COLOR_MODE_COLOR_TEMP,
-    COLOR_MODE_HS,
-    COLOR_MODE_ONOFF,
-    COLOR_MODE_RGB,
-    COLOR_MODE_UNKNOWN,
-    FLASH_LONG,
-    FLASH_SHORT,
-    SUPPORT_EFFECT,
-    SUPPORT_FLASH,
-    SUPPORT_TRANSITION,
+    ColorMode,
     LightEntity,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
-from typing import Any, Final, Literal, TypedDict, final
+from typing import Any
 from .const import (
     DOMAIN,
     SWITCH_TYPE_CODE,
@@ -45,7 +26,6 @@ from .const import (
 )
 from .tcp_client import tcp_client
 import logging
-from homeassistant.components import zeroconf
 
 _LOGGER = logging.getLogger(__name__)
 _LOGGER.info(__name__)
@@ -83,9 +63,13 @@ class CozyLifeLight(LightEntity):
     # _attr_hs_color = None
     _tcp_client = None
 
-    _attr_supported_color_modes = {COLOR_MODE_BRIGHTNESS, COLOR_MODE_ONOFF}
-    _attr_color_mode = COLOR_MODE_BRIGHTNESS
+    _attr_supported_color_modes = {ColorMode.BRIGHTNESS}
+    _attr_color_mode = ColorMode.BRIGHTNESS
     _attr_should_poll = True  # Enable polling for this entity
+
+    # Color temperature range in Kelvin (replacing deprecated mireds)
+    _attr_min_color_temp_kelvin = 2000  # Warmest (equivalent to 500 mireds)
+    _attr_max_color_temp_kelvin = 6535  # Coldest (equivalent to 153 mireds)
 
     # _unique_id = str
     # _attr_is_on = True
@@ -112,12 +96,12 @@ class CozyLifeLight(LightEntity):
 
         # Configure color modes based on device capabilities
         if 3 in tcp_client.dpid:
-            self._attr_color_mode = COLOR_MODE_COLOR_TEMP
-            self._attr_supported_color_modes.add(COLOR_MODE_COLOR_TEMP)
+            self._attr_color_mode = ColorMode.COLOR_TEMP
+            self._attr_supported_color_modes.add(ColorMode.COLOR_TEMP)
 
         if 5 in tcp_client.dpid or 6 in tcp_client.dpid:
-            self._attr_color_mode = COLOR_MODE_HS
-            self._attr_supported_color_modes.add(COLOR_MODE_HS)
+            self._attr_color_mode = ColorMode.HS
+            self._attr_supported_color_modes.add(ColorMode.HS)
 
         _LOGGER.info(f'after:{self._unique_id}._attr_color_mode={self._attr_color_mode}.'
                      f'_attr_supported_color_modes={self._attr_supported_color_modes}.dpid={tcp_client.dpid}')
@@ -188,9 +172,6 @@ class CozyLifeLight(LightEntity):
         brightness = kwargs.get(ATTR_BRIGHTNESS)
         colortemp = kwargs.get(ATTR_COLOR_TEMP)
         hs_color = kwargs.get(ATTR_HS_COLOR)
-        rgb = kwargs.get(ATTR_RGB_COLOR)
-        flash = kwargs.get(ATTR_FLASH)
-        effect = kwargs.get(ATTR_EFFECT)
 
         _LOGGER.info(f'turn_on.kwargs={kwargs}')
 
