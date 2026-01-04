@@ -1,5 +1,5 @@
 import socket
-import time
+import asyncio
 from .utils import get_sn
 import logging
 
@@ -17,9 +17,9 @@ DISCOVERY_MAX_RETRIES = 5
 DISCOVERY_MAX_RESPONSES = 255
 
 
-def get_ip() -> list:
+async def get_ip() -> list:
     """
-    Discover devices via UDP broadcast
+    Discover devices via UDP broadcast (async)
     Returns list of device IP addresses
     """
     server = None
@@ -40,7 +40,7 @@ def get_ip() -> list:
             except socket.error as e:
                 _LOGGER.error(f'Failed to send UDP broadcast: {e}')
                 return []
-            time.sleep(0.03)
+            await asyncio.sleep(0.03)  # Use async sleep
             i += 1
 
         # Wait for first response

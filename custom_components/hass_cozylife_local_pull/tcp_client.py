@@ -92,6 +92,7 @@ class tcp_client(object):
         self._connection_lock = threading.RLock()  # Reentrant lock for thread safety
         self._last_successful_query = None
         self._consecutive_failures = 0
+        self._reconnect_thread = None  # Track reconnection thread to prevent duplicates
 
         # Retry configuration (can be overridden)
         self._retry_max_attempts = RETRY_MAX_ATTEMPTS
@@ -101,12 +102,16 @@ class tcp_client(object):
         self._reconnect()
     
     def _close_connection(self):
-        if self._connect:
-            try:
-                self._connect.close()
-            except Exception as e:
-                _LOGGER.error(f'Error while closing the connection: {e}')
-            self._connect = None
+        """Close socket connection with proper locking"""
+        with self._connection_lock:
+            if self._connect:
+                try:
+                    self._connect.close()
+                    _LOGGER.debug(f'Closed connection to {self._ip}')
+                except Exception as e:
+                    _LOGGER.error(f'Error while closing the connection to {self._ip}: {e}')
+                finally:
+                    self._connect = None
 
     @property
     def is_connected(self) -> bool:
@@ -130,9 +135,25 @@ class tcp_client(object):
                 _LOGGER.info(f'Device {self._ip} connection state: {old_state.value} -> {state.value}')
 
     def _reconnect(self):
+        """Start reconnection thread if not already running"""
+        # Check if reconnection thread is already running
+        with self._connection_lock:
+            if self._reconnect_thread and self._reconnect_thread.is_alive():
+                _LOGGER.debug(f'Reconnection thread already running for {self._ip}')
+                return
+
         def reconnect_thread():
-            while True:
+            attempt = 0
+            max_attempts = 100  # Prevent infinite reconnection attempts
+
+            while attempt < max_attempts:
+                attempt += 1
+
+                # Close any existing connection first
+                self._close_connection()
                 self._set_connection_state(ConnectionState.CONNECTING)
+
+                s = None
                 try:
                     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     s.settimeout(TIMEOUT_CONNECTION)
@@ -148,25 +169,57 @@ class tcp_client(object):
                     if self._device_id:
                         self._set_connection_state(ConnectionState.CONNECTED)
                         self._consecutive_failures = 0
-                        _LOGGER.info(f'Successfully connected to {self._ip}')
+                        _LOGGER.info(f'Successfully connected to {self._ip} (attempt {attempt})')
                         return
                     else:
+                        # Device info failed - close the socket
+                        if s:
+                            try:
+                                s.close()
+                            except:
+                                pass
+                        with self._connection_lock:
+                            self._connect = None
                         raise Exception("Device info retrieval failed")
 
                 except socket.timeout as e:
-                    _LOGGER.warning(f'Connection timeout for {self._ip}: {e}')
+                    _LOGGER.warning(f'Connection timeout for {self._ip} (attempt {attempt}): {e}')
                     self._set_connection_state(ConnectionState.DISCONNECTED)
+                    if s:
+                        try:
+                            s.close()
+                        except:
+                            pass
                 except socket.error as e:
-                    _LOGGER.warning(f'Socket error connecting to {self._ip}: {e}')
+                    _LOGGER.warning(f'Socket error connecting to {self._ip} (attempt {attempt}): {e}')
                     self._set_connection_state(ConnectionState.DISCONNECTED)
+                    if s:
+                        try:
+                            s.close()
+                        except:
+                            pass
                 except Exception as e:
-                    _LOGGER.error(f'Reconnection failed for {self._ip}: {e}')
+                    _LOGGER.error(f'Reconnection failed for {self._ip} (attempt {attempt}): {e}')
                     self._set_connection_state(ConnectionState.DISCONNECTED)
+                    if s:
+                        try:
+                            s.close()
+                        except:
+                            pass
 
-                time.sleep(60)  # Wait for 60 seconds before trying to reconnect
+                # Wait before next attempt
+                time.sleep(60)
+
+            # Max attempts reached
+            _LOGGER.error(f'Reconnection abandoned for {self._ip} after {max_attempts} attempts')
+            self._set_connection_state(ConnectionState.DISCONNECTED)
 
         thread = threading.Thread(target=reconnect_thread, name=f'reconnect_{self._ip}')
-        thread.daemon = True  # This makes the thread exit when the main program exits
+        thread.daemon = True
+
+        with self._connection_lock:
+            self._reconnect_thread = thread
+
         thread.start()
 
 
@@ -200,12 +253,21 @@ class tcp_client(object):
     
     def _device_info(self) -> None:
         """Get device model information"""
-        if not self.is_connected:
-            _LOGGER.warning(f'Cannot get device info - not connected to {self._ip}')
-            return None
+        # Check if socket exists (not full connection state, as this is called during CONNECTING state)
+        with self._connection_lock:
+            if self._connect is None:
+                _LOGGER.warning(f'Cannot get device info - no socket for {self._ip}')
+                return None
 
         try:
-            self._only_send(CMD_INFO, {})
+            # Send device info request - manually to avoid is_connected check
+            package = self._get_package(CMD_INFO, {})
+            with self._connection_lock:
+                if self._connect is None:
+                    _LOGGER.warning(f'Connection lost before sending device info to {self._ip}')
+                    return None
+                self._connect.settimeout(TIMEOUT_SEND)
+                self._connect.send(package)
         except Exception as e:
             _LOGGER.error(f'Failed to send device info request to {self._ip}: {e}')
             return None

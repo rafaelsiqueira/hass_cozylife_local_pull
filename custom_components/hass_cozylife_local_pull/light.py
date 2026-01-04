@@ -82,17 +82,18 @@ class CozyLifeLight(LightEntity):
     # _attr_color_temp: int | None = None
     # _attr_hs_color = None
     _tcp_client = None
-    
+
     _attr_supported_color_modes = {COLOR_MODE_BRIGHTNESS, COLOR_MODE_ONOFF}
     _attr_color_mode = COLOR_MODE_BRIGHTNESS
-    
+    _attr_should_poll = True  # Enable polling for this entity
+
     # _unique_id = str
     # _attr_is_on = True
     # _name = str
     # _attr_brightness = int
     # _attr_color_temp = int
     # _attr_hs_color = (float, float)
-    
+
     def __init__(self, tcp_client: tcp_client) -> None:
         """Initialize the sensor."""
         _LOGGER.info('__init__')
@@ -120,10 +121,10 @@ class CozyLifeLight(LightEntity):
         _LOGGER.info(f'after:{self._unique_id}._attr_color_mode={self._attr_color_mode}.'
                      f'_attr_supported_color_modes={self._attr_supported_color_modes}.dpid={tcp_client.dpid}')
 
-        self._refresh_state()
-    
-    def _refresh_state(self):
-        """Query device and set attributes"""
+        # Don't query immediately - wait for first update() call
+
+    async def async_update(self):
+        """Fetch new state data for this light (called by HA periodically)"""
         result = self._tcp_client.query()
 
         if result.success:
@@ -163,9 +164,7 @@ class CozyLifeLight(LightEntity):
 
     @property
     def is_on(self) -> bool:
-        """Return True if entity is on."""
-        if self._attr_available:
-            self._refresh_state()
+        """Return True if entity is on (cached value from async_update)."""
         return self._attr_is_on
     
     @property
@@ -178,7 +177,7 @@ class CozyLifeLight(LightEntity):
         """Return a unique ID."""
         return self._unique_id
 
-    def turn_on(self, **kwargs: Any) -> None:
+    async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the entity on."""
         if not self._attr_available:
             _LOGGER.warning(f'Cannot turn on {self._name} - device unavailable')
@@ -210,12 +209,12 @@ class CozyLifeLight(LightEntity):
         success = self._tcp_client.control(payload)
         if success:
             self._attr_is_on = True
-            self._refresh_state()  # Verify state change
+            # State will be verified on next async_update() call
         else:
             _LOGGER.error(f'Failed to turn on {self._name}')
             self._attr_available = False
 
-    def turn_off(self, **kwargs: Any) -> None:
+    async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the entity off."""
         if not self._attr_available:
             _LOGGER.warning(f'Cannot turn off {self._name} - device unavailable')
@@ -226,25 +225,19 @@ class CozyLifeLight(LightEntity):
         success = self._tcp_client.control({'1': 0})
         if success:
             self._attr_is_on = False
-            self._refresh_state()  # Verify state change
+            # State will be verified on next async_update() call
         else:
             _LOGGER.error(f'Failed to turn off {self._name}')
             self._attr_available = False
     
     @property
     def hs_color(self) -> tuple[float, float] | None:
-        """Return the hue and saturation color value [float, float]."""
-        _LOGGER.info('hs_color')
-        if self._attr_available:
-            self._refresh_state()
+        """Return the hue and saturation color value [float, float] (cached value)."""
         return self._attr_hs_color
 
     @property
     def brightness(self) -> int | None:
-        """Return the brightness of this light between 0..255."""
-        _LOGGER.info('brightness')
-        if self._attr_available:
-            self._refresh_state()
+        """Return the brightness of this light between 0..255 (cached value)."""
         return self._attr_brightness
     
     @property

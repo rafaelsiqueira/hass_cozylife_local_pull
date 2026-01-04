@@ -22,7 +22,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Async setup with proper device initialization"""
 
     # Discovery
-    ip = get_ip()
+    ip = await get_ip()
     ip_from_config = config[DOMAIN].get('ip') if config[DOMAIN].get('ip') is not None else []
     ip += ip_from_config
     ip_list = []

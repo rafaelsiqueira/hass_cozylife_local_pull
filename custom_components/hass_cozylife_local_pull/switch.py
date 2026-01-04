@@ -53,6 +53,7 @@ class CozyLifeSwitch(SwitchEntity):
     _tcp_client = None
     _attr_available = False
     _attr_is_on = False
+    _attr_should_poll = True  # Enable polling for this entity
 
     def __init__(self, tcp_client) -> None:
         """Initialize the sensor."""
@@ -62,10 +63,10 @@ class CozyLifeSwitch(SwitchEntity):
         self._name = tcp_client.device_model_name + ' ' + tcp_client.device_id[-4:]
         self._attr_available = False  # Start as unavailable
         self._attr_is_on = False
-        self._refresh_state()
+        # Don't query immediately - wait for first update() call
 
-    def _refresh_state(self):
-        """Refresh device state from query"""
+    async def async_update(self):
+        """Fetch new state data for this switch (called by HA periodically)"""
         result = self._tcp_client.query()
 
         if result.success:
@@ -90,9 +91,7 @@ class CozyLifeSwitch(SwitchEntity):
 
     @property
     def is_on(self) -> bool:
-        """Return True if entity is on."""
-        if self._attr_available:
-            self._refresh_state()
+        """Return True if entity is on (cached value from async_update)."""
         return self._attr_is_on
     
     @property
@@ -100,7 +99,7 @@ class CozyLifeSwitch(SwitchEntity):
         """Return a unique ID."""
         return self._unique_id
     
-    def turn_on(self, **kwargs: Any) -> None:
+    async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the entity on."""
         _LOGGER.info(f'turn_on:{kwargs}')
 
@@ -111,12 +110,12 @@ class CozyLifeSwitch(SwitchEntity):
         success = self._tcp_client.control({'1': 255})
         if success:
             self._attr_is_on = True
-            self._refresh_state()  # Verify state change
+            # State will be verified on next async_update() call
         else:
             _LOGGER.error(f'Failed to turn on {self._name}')
             self._attr_available = False
 
-    def turn_off(self, **kwargs: Any) -> None:
+    async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the entity off."""
         _LOGGER.info('turn_off')
 
@@ -127,7 +126,7 @@ class CozyLifeSwitch(SwitchEntity):
         success = self._tcp_client.control({'1': 0})
         if success:
             self._attr_is_on = False
-            self._refresh_state()  # Verify state change
+            # State will be verified on next async_update() call
         else:
             _LOGGER.error(f'Failed to turn off {self._name}')
             self._attr_available = False
