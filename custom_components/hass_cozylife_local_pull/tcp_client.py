@@ -280,12 +280,15 @@ class tcp_client(object):
                 self._connect.settimeout(TIMEOUT_QUERY)
                 resp = self._connect.recv(1024)
 
-            resp_json = json.loads(resp.strip())
+            # Parse potentially multiple JSON messages, matching by sequence number
+            resp_json = self._parse_json_messages(resp, self._sn)
+
+            if resp_json is None:
+                _LOGGER.warning(f'No matching device info response from {self._ip}')
+                return None
+
         except socket.timeout:
             _LOGGER.warning(f'Timeout receiving device info from {self._ip}')
-            return None
-        except json.JSONDecodeError as e:
-            _LOGGER.error(f'Invalid JSON in device info response from {self._ip}: {e}')
             return None
         except Exception as e:
             _LOGGER.error(f'Error receiving device info from {self._ip}: {e}')
@@ -389,7 +392,51 @@ class tcp_client(object):
         payload_str = json.dumps(message, separators=(',', ':',))
         _LOGGER.info(f'_package={payload_str}')
         return bytes(payload_str + "\r\n", encoding='utf8')
-    
+
+    def _parse_json_messages(self, data: bytes, expected_sn: str) -> Optional[dict]:
+        """
+        Parse potentially multiple JSON messages from socket data.
+        Messages are delimited by \\r\\n.
+        Returns the message matching expected_sn, or None if not found.
+        """
+        try:
+            # Decode bytes to string
+            data_str = data.decode('utf-8', errors='ignore').strip()
+
+            if not data_str:
+                return None
+
+            # Split by message delimiter
+            messages = data_str.split('\r\n')
+
+            for msg_str in messages:
+                msg_str = msg_str.strip()
+                if not msg_str:
+                    continue
+
+                try:
+                    msg_json = json.loads(msg_str)
+
+                    # Check if this message matches our sequence number
+                    if msg_json.get('sn') == expected_sn:
+                        _LOGGER.debug(f'Found matching response for sn={expected_sn}')
+                        return msg_json
+                    else:
+                        # Log other messages (like push notifications cmd=10)
+                        cmd = msg_json.get('cmd', 'unknown')
+                        sn = msg_json.get('sn', 'unknown')
+                        _LOGGER.debug(f'Received non-matching message: cmd={cmd}, sn={sn} (expected sn={expected_sn})')
+
+                except json.JSONDecodeError as e:
+                    _LOGGER.warning(f'Failed to parse individual message from {self._ip}: {e}. Message: {msg_str[:100]}')
+                    continue
+
+            return None
+
+        except Exception as e:
+            _LOGGER.error(f'Error parsing messages from {self._ip}: {e}')
+            return None
+
     def _send_receiver(self, cmd: int, payload: dict) -> QueryResult:
         """
         Send command and receive response
@@ -450,8 +497,11 @@ class tcp_client(object):
 
         # Receive response
         try:
-            i = 10
-            while i > 0:
+            # Limit recv attempts to prevent long waits
+            # First attempt: full timeout (3s) for device to respond
+            # Additional attempts: short timeout (0.3s) to check for buffered data
+            max_recv_attempts = 3
+            for attempt in range(max_recv_attempts):
                 with self._connection_lock:
                     if self._connect is None:
                         return QueryResult(
@@ -461,25 +511,16 @@ class tcp_client(object):
                             error_message='Connection lost during recv',
                             should_retry=True
                         )
-                    self._connect.settimeout(TIMEOUT_QUERY)
+                    # Use full timeout for first attempt, shorter for subsequent
+                    timeout = TIMEOUT_QUERY if attempt == 0 else 0.3
+                    self._connect.settimeout(timeout)
                     res = self._connect.recv(1024)
 
-                i -= 1
+                # Parse potentially multiple JSON messages from buffer
+                payload_data = self._parse_json_messages(res, self._sn)
 
-                # Only process responses matching our sequence number
-                if self._sn in str(res):
-                    try:
-                        payload_data = json.loads(res.strip())
-                    except json.JSONDecodeError as e:
-                        _LOGGER.error(f'Invalid JSON from {self._ip}: {e}')
-                        return QueryResult(
-                            success=False,
-                            data={},
-                            error_type=ErrorType.PROTOCOL_ERROR,
-                            error_message='Invalid JSON response',
-                            should_retry=False
-                        )
-
+                # If we found a matching response, validate and return it
+                if payload_data is not None:
                     # Validate response structure
                     if not isinstance(payload_data, dict) or not payload_data:
                         return QueryResult(
@@ -519,12 +560,16 @@ class tcp_client(object):
                         should_retry=False
                     )
 
-            # No matching response received
+                # No matching response in this recv, continue loop to read more data
+                _LOGGER.debug(f'Recv attempt {attempt + 1}/{max_recv_attempts}: No matching response for sn={self._sn}')
+
+            # No matching response received after all attempts
+            _LOGGER.warning(f'No matching response received from {self._ip} after {max_recv_attempts} recv attempts (sn={self._sn})')
             return QueryResult(
                 success=False,
                 data={},
                 error_type=ErrorType.TIMEOUT_ERROR,
-                error_message='No matching response received',
+                error_message=f'No matching response after {max_recv_attempts} attempts',
                 should_retry=True
             )
 
