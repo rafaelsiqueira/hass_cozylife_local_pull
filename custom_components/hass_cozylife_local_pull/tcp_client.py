@@ -93,6 +93,7 @@ class tcp_client(object):
         self._last_successful_query = None
         self._consecutive_failures = 0
         self._reconnect_thread = None  # Track reconnection thread to prevent duplicates
+        self._recv_buffer = b''  # Buffer for accumulating incomplete TCP messages
 
         # Retry configuration (can be overridden)
         self._retry_max_attempts = RETRY_MAX_ATTEMPTS
@@ -112,6 +113,8 @@ class tcp_client(object):
                     _LOGGER.error(f'Error while closing the connection to {self._ip}: {e}')
                 finally:
                     self._connect = None
+            # Clear receive buffer when connection closes
+            self._recv_buffer = b''
 
     @property
     def is_connected(self) -> bool:
@@ -284,15 +287,27 @@ class tcp_client(object):
             return None
 
         try:
-            with self._connection_lock:
-                if self._connect is None:
-                    _LOGGER.warning(f'Connection lost during device info for {self._ip}')
-                    return None
-                self._connect.settimeout(TIMEOUT_QUERY)
-                resp = self._connect.recv(1024)
+            # Try multiple recv attempts to handle partial messages
+            resp_json = None
+            max_attempts = 3
 
-            # Parse potentially multiple JSON messages, matching by sequence number
-            resp_json = self._parse_json_messages(resp, self._sn)
+            for attempt in range(max_attempts):
+                with self._connection_lock:
+                    if self._connect is None:
+                        _LOGGER.warning(f'Connection lost during device info for {self._ip}')
+                        return None
+                    timeout = TIMEOUT_QUERY if attempt == 0 else 0.3
+                    self._connect.settimeout(timeout)
+                    resp = self._connect.recv(1024)
+
+                # Extract complete messages from buffered data
+                complete_messages = self._extract_complete_messages(resp)
+
+                # Find the message matching our sequence number
+                resp_json = self._find_matching_message(complete_messages, self._sn)
+
+                if resp_json is not None:
+                    break
 
             if resp_json is None:
                 _LOGGER.warning(f'No matching device info response from {self._ip}')
@@ -404,49 +419,65 @@ class tcp_client(object):
         _LOGGER.info(f'_package={payload_str}')
         return bytes(payload_str + "\r\n", encoding='utf8')
 
-    def _parse_json_messages(self, data: bytes, expected_sn: str) -> Optional[dict]:
+    def _extract_complete_messages(self, new_data: bytes) -> list:
         """
-        Parse potentially multiple JSON messages from socket data.
-        Messages are delimited by \\r\\n.
-        Returns the message matching expected_sn, or None if not found.
+        Accumulate received data and extract complete messages.
+        Messages are delimited by \\r\\n. Handles partial messages split across recv() calls.
+        Returns list of complete message strings.
         """
-        try:
-            # Decode bytes to string
-            data_str = data.decode('utf-8', errors='ignore').strip()
+        # Add new data to buffer
+        self._recv_buffer += new_data
 
-            if not data_str:
-                return None
+        complete_messages = []
 
-            # Split by message delimiter
-            messages = data_str.split('\r\n')
+        while b'\r\n' in self._recv_buffer:
+            # Find the delimiter
+            delimiter_pos = self._recv_buffer.find(b'\r\n')
 
-            for msg_str in messages:
-                msg_str = msg_str.strip()
-                if not msg_str:
-                    continue
+            # Extract one complete message
+            message_bytes = self._recv_buffer[:delimiter_pos]
 
-                try:
-                    msg_json = json.loads(msg_str)
+            # Remove the message and delimiter from buffer
+            self._recv_buffer = self._recv_buffer[delimiter_pos + 2:]
 
-                    # Check if this message matches our sequence number
-                    if msg_json.get('sn') == expected_sn:
-                        _LOGGER.debug(f'Found matching response for sn={expected_sn}')
-                        return msg_json
-                    else:
-                        # Log other messages (like push notifications cmd=10)
-                        cmd = msg_json.get('cmd', 'unknown')
-                        sn = msg_json.get('sn', 'unknown')
-                        _LOGGER.debug(f'Received non-matching message: cmd={cmd}, sn={sn} (expected sn={expected_sn})')
+            # Decode to string
+            try:
+                message_str = message_bytes.decode('utf-8', errors='ignore').strip()
+                if message_str:
+                    complete_messages.append(message_str)
+            except Exception as e:
+                _LOGGER.warning(f'Failed to decode message from {self._ip}: {e}')
+                continue
 
-                except json.JSONDecodeError as e:
-                    _LOGGER.warning(f'Failed to parse individual message from {self._ip}: {e}. Message: {msg_str[:100]}')
-                    continue
+        return complete_messages
 
-            return None
+    def _find_matching_message(self, messages: list, expected_sn: str) -> Optional[dict]:
+        """
+        Parse JSON messages and find the one matching expected_sn.
+        Returns the matching message dict, or None if not found.
+        """
+        for msg_str in messages:
+            if not msg_str:
+                continue
 
-        except Exception as e:
-            _LOGGER.error(f'Error parsing messages from {self._ip}: {e}')
-            return None
+            try:
+                msg_json = json.loads(msg_str)
+
+                # Check if this message matches our sequence number
+                if msg_json.get('sn') == expected_sn:
+                    _LOGGER.debug(f'Found matching response for sn={expected_sn}')
+                    return msg_json
+                else:
+                    # Log other messages (like push notifications cmd=10)
+                    cmd = msg_json.get('cmd', 'unknown')
+                    sn = msg_json.get('sn', 'unknown')
+                    _LOGGER.debug(f'Received non-matching message: cmd={cmd}, sn={sn} (expected sn={expected_sn})')
+
+            except json.JSONDecodeError as e:
+                _LOGGER.warning(f'Failed to parse individual message from {self._ip}: {e}. Message: {msg_str[:100]}')
+                continue
+
+        return None
 
     def _send_receiver(self, cmd: int, payload: dict) -> QueryResult:
         """
@@ -527,8 +558,11 @@ class tcp_client(object):
                     self._connect.settimeout(timeout)
                     res = self._connect.recv(1024)
 
-                # Parse potentially multiple JSON messages from buffer
-                payload_data = self._parse_json_messages(res, self._sn)
+                # Extract complete messages from buffered data (handles partial messages)
+                complete_messages = self._extract_complete_messages(res)
+
+                # Find the message matching our sequence number
+                payload_data = self._find_matching_message(complete_messages, self._sn)
 
                 # If we found a matching response, validate and return it
                 if payload_data is not None:
