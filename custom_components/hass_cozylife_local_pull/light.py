@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
-    ATTR_COLOR_TEMP,
+    ATTR_COLOR_TEMP_KELVIN,
     ATTR_HS_COLOR,
     ColorMode,
     LightEntity,
@@ -57,26 +57,16 @@ def setup_platform(
 
 
 class CozyLifeLight(LightEntity):
-    # _attr_brightness: int | None = None
-    # _attr_color_mode: str | None = None
-    # _attr_color_temp: int | None = None
-    # _attr_hs_color = None
     _tcp_client = None
 
-    _attr_supported_color_modes = {ColorMode.BRIGHTNESS}
-    _attr_color_mode = ColorMode.BRIGHTNESS
+    # Will be set in __init__ based on device capabilities
+    _attr_supported_color_modes = None
+    _attr_color_mode = None
     _attr_should_poll = True  # Enable polling for this entity
 
-    # Color temperature range in Kelvin (replacing deprecated mireds)
+    # Color temperature range in Kelvin (only used if device supports COLOR_TEMP)
     _attr_min_color_temp_kelvin = 2000  # Warmest (equivalent to 500 mireds)
     _attr_max_color_temp_kelvin = 6535  # Coldest (equivalent to 153 mireds)
-
-    # _unique_id = str
-    # _attr_is_on = True
-    # _name = str
-    # _attr_brightness = int
-    # _attr_color_temp = int
-    # _attr_hs_color = (float, float)
 
     def __init__(self, tcp_client: tcp_client, hass) -> None:
         """Initialize the sensor."""
@@ -88,23 +78,26 @@ class CozyLifeLight(LightEntity):
         self._attr_available = False  # Start as unavailable
         self._attr_is_on = False
         self._attr_brightness = None
-        self._attr_color_temp = None
+        self._attr_color_temp_kelvin = None
         self._attr_hs_color = None
 
-        _LOGGER.info(f'before:{self._unique_id}._attr_color_mode={self._attr_color_mode}.'
-                     f'_attr_supported_color_modes={self._attr_supported_color_modes}.dpid={tcp_client.dpid}')
-
         # Configure color modes based on device capabilities
-        if 3 in tcp_client.dpid:
-            self._attr_color_mode = ColorMode.COLOR_TEMP
-            self._attr_supported_color_modes.add(ColorMode.COLOR_TEMP)
-
+        # Note: COLOR_TEMP and HS modes include brightness control, so don't combine with BRIGHTNESS
         if 5 in tcp_client.dpid or 6 in tcp_client.dpid:
+            # Device supports hue/saturation (full color control)
             self._attr_color_mode = ColorMode.HS
-            self._attr_supported_color_modes.add(ColorMode.HS)
+            self._attr_supported_color_modes = {ColorMode.HS}
+        elif 3 in tcp_client.dpid:
+            # Device supports color temperature (white spectrum)
+            self._attr_color_mode = ColorMode.COLOR_TEMP
+            self._attr_supported_color_modes = {ColorMode.COLOR_TEMP}
+        else:
+            # Device only supports brightness (dimmable white)
+            self._attr_color_mode = ColorMode.BRIGHTNESS
+            self._attr_supported_color_modes = {ColorMode.BRIGHTNESS}
 
-        _LOGGER.info(f'after:{self._unique_id}._attr_color_mode={self._attr_color_mode}.'
-                     f'_attr_supported_color_modes={self._attr_supported_color_modes}.dpid={tcp_client.dpid}')
+        _LOGGER.info(f'{self._unique_id}: color_mode={self._attr_color_mode}, '
+                     f'supported_modes={self._attr_supported_color_modes}, dpid={tcp_client.dpid}')
 
         # Don't query immediately - wait for first update() call
 
@@ -129,10 +122,13 @@ class CozyLifeLight(LightEntity):
                 self._attr_hs_color = (int(data['5']), int(data['6'] / 10))
 
             if '3' in data:
-                self._attr_color_temp = 500 - int(data['3'] / 2)
+                # Convert device value (0-1000) to Kelvin
+                # Device 0 = coldest (6535K), Device 1000 = warmest (2000K)
+                device_value = data['3']
+                self._attr_color_temp_kelvin = int(6535 - (device_value / 1000) * (6535 - 2000))
 
             _LOGGER.debug(f'Light {self._name} refreshed: is_on={self._attr_is_on}, '
-                         f'brightness={self._attr_brightness}, color_temp={self._attr_color_temp}')
+                         f'brightness={self._attr_brightness}, color_temp_kelvin={self._attr_color_temp_kelvin}')
         else:
             # Mark as unavailable on error
             self._attr_available = False
@@ -152,12 +148,7 @@ class CozyLifeLight(LightEntity):
     def is_on(self) -> bool:
         """Return True if entity is on (cached value from async_update)."""
         return self._attr_is_on
-    
-    @property
-    def color_temp(self) -> int | None:
-        """Return the CT color value in mireds."""
-        return self._attr_color_temp
-    
+
     @property
     def unique_id(self) -> str | None:
         """Return a unique ID."""
@@ -170,7 +161,7 @@ class CozyLifeLight(LightEntity):
             return
 
         brightness = kwargs.get(ATTR_BRIGHTNESS)
-        colortemp = kwargs.get(ATTR_COLOR_TEMP)
+        color_temp_kelvin = kwargs.get(ATTR_COLOR_TEMP_KELVIN)
         hs_color = kwargs.get(ATTR_HS_COLOR)
 
         _LOGGER.info(f'turn_on.kwargs={kwargs}')
@@ -186,8 +177,12 @@ class CozyLifeLight(LightEntity):
             payload['6'] = int(hs_color[1] * 10)
             self._attr_hs_color = hs_color
 
-        if colortemp is not None:
-            payload['3'] = 1000 - colortemp * 2
+        if color_temp_kelvin is not None:
+            # Convert Kelvin to device value (0-1000)
+            # 6535K (coldest) -> 0, 2000K (warmest) -> 1000
+            device_value = int(((6535 - color_temp_kelvin) * 1000) / (6535 - 2000))
+            payload['3'] = max(0, min(1000, device_value))  # Clamp to valid range
+            self._attr_color_temp_kelvin = color_temp_kelvin
 
         # Run blocking control() in executor to avoid blocking event loop
         success = await self._hass.async_add_executor_job(

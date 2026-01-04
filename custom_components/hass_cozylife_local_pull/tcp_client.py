@@ -144,9 +144,15 @@ class tcp_client(object):
 
         def reconnect_thread():
             attempt = 0
-            max_attempts = 100  # Prevent infinite reconnection attempts
+            # Keep trying indefinitely with exponential backoff
+            # Devices can come back online at any time (network recovery, device reboot, etc.)
 
-            while attempt < max_attempts:
+            # Exponential backoff configuration
+            base_delay = 5  # Start with 5 seconds
+            max_delay = 300  # Cap at 5 minutes
+            backoff_multiplier = 2
+
+            while True:  # Retry indefinitely
                 attempt += 1
 
                 # Close any existing connection first
@@ -169,7 +175,7 @@ class tcp_client(object):
                     if self._device_id:
                         self._set_connection_state(ConnectionState.CONNECTED)
                         self._consecutive_failures = 0
-                        _LOGGER.info(f'Successfully connected to {self._ip} (attempt {attempt})')
+                        _LOGGER.info(f'Successfully reconnected to {self._ip} after {attempt} attempt(s)')
                         return
                     else:
                         # Device info failed - close the socket
@@ -183,7 +189,7 @@ class tcp_client(object):
                         raise Exception("Device info retrieval failed")
 
                 except socket.timeout as e:
-                    _LOGGER.warning(f'Connection timeout for {self._ip} (attempt {attempt}): {e}')
+                    _LOGGER.debug(f'Connection timeout for {self._ip} (attempt {attempt}): {e}')
                     self._set_connection_state(ConnectionState.DISCONNECTED)
                     if s:
                         try:
@@ -191,7 +197,7 @@ class tcp_client(object):
                         except:
                             pass
                 except socket.error as e:
-                    _LOGGER.warning(f'Socket error connecting to {self._ip} (attempt {attempt}): {e}')
+                    _LOGGER.debug(f'Socket error connecting to {self._ip} (attempt {attempt}): {e}')
                     self._set_connection_state(ConnectionState.DISCONNECTED)
                     if s:
                         try:
@@ -199,7 +205,7 @@ class tcp_client(object):
                         except:
                             pass
                 except Exception as e:
-                    _LOGGER.error(f'Reconnection failed for {self._ip} (attempt {attempt}): {e}')
+                    _LOGGER.debug(f'Reconnection failed for {self._ip} (attempt {attempt}): {e}')
                     self._set_connection_state(ConnectionState.DISCONNECTED)
                     if s:
                         try:
@@ -207,12 +213,17 @@ class tcp_client(object):
                         except:
                             pass
 
-                # Wait before next attempt
-                time.sleep(60)
+                # Calculate exponential backoff delay with jitter
+                delay = min(base_delay * (backoff_multiplier ** (attempt - 1)), max_delay)
+                # Add jitter (±25% randomization) to avoid thundering herd
+                jitter = delay * 0.25 * (2 * random.random() - 1)
+                actual_delay = max(1, delay + jitter)
 
-            # Max attempts reached
-            _LOGGER.error(f'Reconnection abandoned for {self._ip} after {max_attempts} attempts')
-            self._set_connection_state(ConnectionState.DISCONNECTED)
+                # Log reconnection status periodically (every 10 attempts or when delay maxes out)
+                if attempt % 10 == 0 or actual_delay >= max_delay:
+                    _LOGGER.info(f'Still trying to reconnect to {self._ip} (attempt {attempt}, next retry in {actual_delay:.1f}s)')
+
+                time.sleep(actual_delay)
 
         thread = threading.Thread(target=reconnect_thread, name=f'reconnect_{self._ip}')
         thread.daemon = True
