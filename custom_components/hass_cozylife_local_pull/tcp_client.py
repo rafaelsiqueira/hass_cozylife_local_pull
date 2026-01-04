@@ -4,7 +4,7 @@ import socket
 import time
 from typing import Optional, Union, Any, Dict
 import logging
-from .utils import get_pid_list, get_sn
+from .utils import get_pid_list_cached, get_sn
 import threading
 from enum import Enum
 from dataclasses import dataclass
@@ -310,7 +310,7 @@ class tcp_client(object):
             return None
 
         self._pid = msg['pid']
-        pid_list = get_pid_list()
+        pid_list = get_pid_list_cached()  # Use cached version (synchronous)
 
         # Match PID to device model
         for item in pid_list:
