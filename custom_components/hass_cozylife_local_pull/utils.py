@@ -22,6 +22,15 @@ def get_sn() -> str:
 _CACHE_PID = []
 
 
+def get_pid_list_cached() -> list:
+    """
+    Get cached PID list (synchronous, for use in threads)
+    :return: Cached list of device models, or empty list if not cached
+    """
+    global _CACHE_PID
+    return _CACHE_PID
+
+
 async def get_pid_list(session: aiohttp.ClientSession, lang='en') -> list:
     """
     Fetch device product models from API (async)
