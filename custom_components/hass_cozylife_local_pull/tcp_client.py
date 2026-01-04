@@ -146,6 +146,7 @@ class tcp_client(object):
                 return
 
         def reconnect_thread():
+            _LOGGER.info(f'Starting reconnection thread for {self._ip}')
             attempt = 0
             # Keep trying indefinitely with exponential backoff
             # Devices can come back online at any time (network recovery, device reboot, etc.)
@@ -222,9 +223,11 @@ class tcp_client(object):
                 jitter = delay * 0.25 * (2 * random.random() - 1)
                 actual_delay = max(1, delay + jitter)
 
-                # Log reconnection status periodically (every 10 attempts or when delay maxes out)
-                if attempt % 10 == 0 or actual_delay >= max_delay:
-                    _LOGGER.info(f'Still trying to reconnect to {self._ip} (attempt {attempt}, next retry in {actual_delay:.1f}s)')
+                # Log reconnection status
+                # - First 5 attempts: log every attempt (so user sees it's working)
+                # - After that: log every 10 attempts or when at max delay
+                if attempt <= 5 or attempt % 10 == 0 or actual_delay >= max_delay:
+                    _LOGGER.info(f'Reconnecting to {self._ip}: attempt {attempt}, next retry in {actual_delay:.1f}s')
 
                 time.sleep(actual_delay)
 
