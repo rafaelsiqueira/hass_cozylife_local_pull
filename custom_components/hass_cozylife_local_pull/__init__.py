@@ -65,32 +65,39 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     # Identify working and failed devices
     working_clients = []
-    failed_ips = []
+    failed_clients = []
 
     for client in tcp_clients:
         if client.is_connected and client.device_id:
             working_clients.append(client)
             _LOGGER.info(f'Device ready: {client._ip} ({client.device_model_name})')
         else:
-            failed_ips.append(client._ip)
-            _LOGGER.warning(f'Device failed to initialize: {client._ip}')
+            failed_clients.append(client)
+            _LOGGER.warning(f'Device failed to initialize: {client._ip} (will keep retrying in background)')
 
     # Report results
-    if len(failed_ips) > 0:
-        _LOGGER.warning(f'Failed to connect to {len(failed_ips)} device(s): {failed_ips}')
+    if len(failed_clients) > 0:
+        failed_ips = [c._ip for c in failed_clients]
+        _LOGGER.warning(f'Failed to connect to {len(failed_clients)} device(s): {failed_ips}')
+        _LOGGER.info(f'Failed devices will continue reconnection attempts with exponential backoff')
+        _LOGGER.info(f'Note: Restart Home Assistant after failed devices come online to create their entities')
 
     if len(working_clients) == 0:
-        _LOGGER.error('No devices successfully connected')
-        return True  # Return True to allow retry later
+        _LOGGER.error('No devices successfully connected initially')
+        if len(failed_clients) > 0:
+            _LOGGER.info(f'Keeping {len(failed_clients)} device(s) in reconnection mode')
+        # Don't return False - allow integration to load so reconnection can work
+        return True
 
     _LOGGER.info(f'Successfully connected to {len(working_clients)}/{len(tcp_clients)} devices')
 
-    # Store working clients
+    # Store ALL clients (both working and failed) to keep reconnection threads alive
     hass.data[DOMAIN] = {
         'temperature': 24,
         'ip': [client._ip for client in working_clients],
         'tcp_client': working_clients,
-        'failed_ips': failed_ips,
+        'failed_clients': failed_clients,  # Keep these alive for reconnection
+        'all_clients': tcp_clients,  # Reference to all clients
     }
 
     # Load platforms with working devices
